@@ -1,43 +1,66 @@
-#!/bin/sh
+#!/bin/bash
 
-# Check if a device is a block device
+# Check if a given device is a block device
 isBlockDevice() {
-    [ "$(ls -l "$1" 2>/dev/null | cut -c 1)" = "b" ]
+  local device=$1
+  [[ $(ls -l "$device" 2>/dev/null | cut -c1) == "b" ]]
 }
 
-# Check if a device is a loop device
+# Check if a given device is a loop device
 isLoopDevice() {
-    losetup "$1" >/dev/null 2>&1
+  local device=$1
+  losetup "$device" >/dev/null 2>&1
+}
+
+# Create a mapping of device names to their corresponding mount points
+getDfOutputMap() {
+  declare -A dfMap
+  while read -r source target; do
+    [[ $source == "/dev/"* ]] && dfMap["$source"]="$target"
+  done < <(df --output=source,target | tail -n +2)
+  echo "${dfMap[@]}"
+}
+
+# Get mount points of non-loopback block devices
+getMountPoints() {
+  local -n dfMap=$1
+  local mountPoints=()
+  for device in "${!dfMap[@]}"; do
+    if isBlockDevice "$device" && ! isLoopDevice "$device"; then
+      mountPoints+=("$device")
+    fi
+  done
+  echo "${mountPoints[@]}"
+}
+
+# Generate volume arguments for container runtime
+generateVolumeArgs() {
+  local -n dfMap=$1
+  local -n mountPoints=$2
+  local volumeArgs=()
+  for device in "${mountPoints[@]}"; do
+    local mount=${dfMap[$device]}
+    if [ "$mount" != "/" ]; then
+      volumeArgs+=("--bind" "$mount:$mount")
+    fi
+  done
+  echo "${volumeArgs[@]}"
 }
 
 # Main function
 main() {
-    # Store passed arguments
-    cmdArgs="$*"
+  # Store passed arguments
+  cmdArgs="$*"
 
-    # Get df output
-    df_output=$(df --output=source,target 2>/dev/null)
+  declare -A dfMap
+  read -ra dfMap <<< "$(getDfOutputMap)"
+  read -ra mountPoints <<< "$(getMountPoints dfMap)"
+  read -ra volumeArgs <<< "$(generateVolumeArgs dfMap mountPoints)"
 
-    # Initialize empty volume arguments
-    volumeArgs=""
+  echo ${volumeArgs[@]}
 
-    # Parse df output
-    echo "$df_output" | tail -n +2 | while read -r source target; do
-        # Skip if not in /dev
-        [ "${source#/dev/}" = "$source" ] && continue
-
-        # Check for block and non-loopback devices
-        if isBlockDevice "$source" && ! isLoopDevice "$source"; then
-            # Exclude root mount
-            [ "$target" != "/" ] || continue
-
-            # Append to volume args
-            volumeArgs="$volumeArgs --bind $target:$target"
-        fi
-    done
-
-    # Execute singularity shell with volume and additional arguments
-    eval "singularity shell $volumeArgs $cmdArgs"
+  # Execute singularity shell with volume and additional arguments
+  #eval "singularity shell $volumeArgs $cmdArgs"
 }
 
 main "$@"
